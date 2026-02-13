@@ -61,7 +61,8 @@ func _ready() -> void:
 func _physics_process(delta: float) -> void:
 	# Add gravity
 	if not is_on_floor():
-		velocity += get_gravity() * delta
+		var gravity = ProjectSettings.get_setting("physics/3d/default_gravity")
+		velocity.y -= gravity * delta
 
 	# Handle Jump (Mobile jump button needed, or double tap? Let's assume a button for now, or just auto-jump)
 	# Since UI is not fully defined for buttons, we stick to movement.

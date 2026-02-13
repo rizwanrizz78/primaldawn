@@ -19,19 +19,22 @@ func _ready() -> void:
 	env.environment = environment
 	add_child(env)
 
-	# 2. Player
-	var player_script = load("res://scripts/Player.gd")
-	var player = player_script.new()
-	player.name = "Player"
-	add_child(player)
-	player.position.y = 10.0 # Start high to avoid falling through terrain immediately
-
-	# 3. Chunk Manager
+	# 2. Chunk Manager (Create first to get height)
 	var chunk_manager_script = load("res://scripts/ChunkManager.gd")
 	var chunk_manager = Node3D.new()
 	chunk_manager.set_script(chunk_manager_script)
 	chunk_manager.name = "ChunkManager"
 	add_child(chunk_manager)
+
+	# 3. Player
+	# Get terrain height at spawn (0,0)
+	var spawn_height = chunk_manager.get_height_at(0, 0)
+
+	var player_script = load("res://scripts/Player.gd")
+	var player = player_script.new()
+	player.name = "Player"
+	add_child(player)
+	player.position = Vector3(0, spawn_height + 5.0, 0) # Spawn 5m above ground to ensure chunk loads
 
 	# Connect ChunkManager to Player
 	chunk_manager.player = player
@@ -45,8 +48,7 @@ func _ready() -> void:
 
 	ui.set_player(player)
 
-	# 5. Mobs (Example: Spawn one wolf)
-	# Since we don't have a mob manager yet, just spawn one near player
+	# 5. Mobs (Spawn one wolf)
 	var mob_script = load("res://scripts/MobAI.gd")
 	var mob = CharacterBody3D.new()
 	mob.set_script(mob_script)
@@ -60,4 +62,8 @@ func _ready() -> void:
 	mob_mesh.mesh = box
 	mob.add_child(mob_mesh)
 
-	mob.position = Vector3(10, 10, 10)
+	# Spawn mob near player but on ground
+	var mob_spawn_x = 10.0
+	var mob_spawn_z = 10.0
+	var mob_spawn_h = chunk_manager.get_height_at(mob_spawn_x, mob_spawn_z)
+	mob.position = Vector3(mob_spawn_x, mob_spawn_h + 1.0, mob_spawn_z)

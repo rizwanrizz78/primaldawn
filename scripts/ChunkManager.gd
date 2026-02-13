@@ -6,28 +6,26 @@ extends Node3D
 
 const CHUNK_SIZE: int = 32
 const VIEW_DISTANCE: int = 4
-const TERRAIN_HEIGHT: float = 20.0
+const TERRAIN_HEIGHT: float = 40.0 # Increased from 20.0 for more depth
 
 var active_chunks: Dictionary = {} # Vector2i -> Node3D (TerrainChunk)
 var pending_chunks: Dictionary = {} # Vector2i -> bool
 
+# We don't instantiate WorkerThreadPool ourselves, it's a singleton in Godot 4
 var thread_pool: WorkerThreadPool
 
 func _ready() -> void:
 	if not noise:
 		noise = FastNoiseLite.new()
 		noise.seed = randi()
-		noise.frequency = 0.02
+		noise.frequency = 0.015 # Slightly lower frequency for larger hills
 		noise.fractal_type = FastNoiseLite.FRACTAL_FBM
 
 	if not chunk_material:
 		var mat = StandardMaterial3D.new()
 		mat.albedo_color = Color(0.3, 0.5, 0.3) # Grass green
+		mat.cull_mode = BaseMaterial3D.CULL_BACK
 		chunk_material = mat
-
-	# Just use the global singleton instance if available, but here we call functions directly
-	# We don't instantiate WorkerThreadPool ourselves, it's a singleton in Godot 4
-	pass
 
 func _process(_delta: float) -> void:
 	if not player:
@@ -56,6 +54,11 @@ func _process(_delta: float) -> void:
 	for chunk_coord in chunks_to_remove:
 		unload_chunk(chunk_coord)
 
+func get_height_at(x: float, z: float) -> float:
+	if not noise:
+		return 0.0
+	return noise.get_noise_2d(x, z) * TERRAIN_HEIGHT
+
 func request_chunk_generation(chunk_coord: Vector2i) -> void:
 	pending_chunks[chunk_coord] = true
 	WorkerThreadPool.add_task(Callable(self, "_generate_chunk_task").bind(chunk_coord))
@@ -66,34 +69,100 @@ func _generate_chunk_task(chunk_coord: Vector2i) -> void:
 	if chunk_material:
 		st.set_material(chunk_material)
 
-	# Create vertices for a grid
-	for x in range(CHUNK_SIZE + 1):
-		for z in range(CHUNK_SIZE + 1):
+	# Store heights for skirt generation
+	# Grid size is CHUNK_SIZE+1 vertices wide
+	var grid_width = CHUNK_SIZE + 1
+	var heights = PackedFloat32Array()
+	heights.resize(grid_width * grid_width)
+
+	# 1. Create Main Grid Vertices
+	for x in range(grid_width):
+		for z in range(grid_width):
 			var world_x = chunk_coord.x * CHUNK_SIZE + x
-			var world_z = chunk_coord.y * CHUNK_SIZE + z # Vector2i uses x, y
+			var world_z = chunk_coord.y * CHUNK_SIZE + z
 
 			var height = noise.get_noise_2d(world_x, world_z) * TERRAIN_HEIGHT
-			# Add UVs and normals as needed
+			heights[x * grid_width + z] = height
+
 			st.set_uv(Vector2(x, z))
 			st.add_vertex(Vector3(x, height, z))
 
-	# Generate indices
+	# 2. Generate Grid Indices
 	for x in range(CHUNK_SIZE):
 		for z in range(CHUNK_SIZE):
-			var i = x * (CHUNK_SIZE + 1) + z
+			var i = x * grid_width + z
 			# Triangle 1
 			st.add_index(i)
 			st.add_index(i + 1)
-			st.add_index(i + CHUNK_SIZE + 1)
+			st.add_index(i + grid_width)
 			# Triangle 2
-			st.add_index(i + CHUNK_SIZE + 1)
+			st.add_index(i + grid_width)
 			st.add_index(i + 1)
-			st.add_index(i + CHUNK_SIZE + 2)
+			st.add_index(i + grid_width + 1)
+
+	# 3. Generate Skirts (Vertical walls at edges)
+	var skirt_depth = 15.0
+
+	# Helper to add quad
+	var add_skirt_quad = func(v1: Vector3, v2: Vector3):
+		# We add 4 new vertices for each quad to ensure hard edges (normals)
+		# v1 and v2 are top vertices. We extend them down.
+		var v3 = v2 - Vector3(0, skirt_depth, 0)
+		var v4 = v1 - Vector3(0, skirt_depth, 0)
+
+		# UVs don't matter much for skirts in this simple style
+		var base_idx = st.get_vertex_count()
+
+		st.add_vertex(v1)
+		st.add_vertex(v2)
+		st.add_vertex(v3)
+		st.add_vertex(v4)
+
+		st.add_index(base_idx)
+		st.add_index(base_idx + 1)
+		st.add_index(base_idx + 2)
+
+		st.add_index(base_idx)
+		st.add_index(base_idx + 2)
+		st.add_index(base_idx + 3)
+
+	# Edge x=0 (Left)
+	for z in range(CHUNK_SIZE):
+		var h1 = heights[0 * grid_width + z]
+		var h2 = heights[0 * grid_width + (z + 1)]
+		# Winding order: we want outside facing out.
+		# For x=0, normal points -x.
+		# Top edge: (0, h1, z) -> (0, h2, z+1).
+		# To face -x, winding should be clockwise if looking from -x?
+		# Verts: TopFar(z+1), TopNear(z), BottomNear(z), BottomFar(z+1)
+		add_skirt_quad.call(Vector3(0, h2, z+1), Vector3(0, h1, z))
+
+	# Edge x=CHUNK_SIZE (Right)
+	for z in range(CHUNK_SIZE):
+		var h1 = heights[CHUNK_SIZE * grid_width + z]
+		var h2 = heights[CHUNK_SIZE * grid_width + (z + 1)]
+		# Normal points +x.
+		add_skirt_quad.call(Vector3(CHUNK_SIZE, h1, z), Vector3(CHUNK_SIZE, h2, z+1))
+
+	# Edge z=0 (Top)
+	for x in range(CHUNK_SIZE):
+		var h1 = heights[x * grid_width + 0]
+		var h2 = heights[(x + 1) * grid_width + 0]
+		# Normal points -z.
+		add_skirt_quad.call(Vector3(x, h1, 0), Vector3(x+1, h2, 0))
+
+	# Edge z=CHUNK_SIZE (Bottom)
+	for x in range(CHUNK_SIZE):
+		var h1 = heights[x * grid_width + CHUNK_SIZE]
+		var h2 = heights[(x + 1) * grid_width + CHUNK_SIZE]
+		# Normal points +z.
+		add_skirt_quad.call(Vector3(x+1, h2, CHUNK_SIZE), Vector3(x, h1, CHUNK_SIZE))
 
 	st.generate_normals()
 	var mesh = st.commit()
 
-	# Create collision shape on thread to avoid lag spike on main thread
+	# Create collision shape on thread
+	# Note: Collision shape usually doesn't need skirts, but for safety it's fine.
 	var shape = mesh.create_trimesh_shape()
 
 	# Send back to main thread
@@ -106,7 +175,7 @@ func _on_chunk_generated(chunk_coord: Vector2i, mesh: ArrayMesh, shape: Shape3D)
 	pending_chunks.erase(chunk_coord)
 
 	var chunk_script = load("res://scripts/TerrainChunk.gd")
-	var chunk_node = Node3D.new() # We can just instance a new Node3D and attach script, or instance scene
+	var chunk_node = Node3D.new()
 	chunk_node.set_script(chunk_script)
 	chunk_node.name = "Chunk_%d_%d" % [chunk_coord.x, chunk_coord.y]
 

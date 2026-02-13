@@ -48,9 +48,14 @@ func _ready() -> void:
 		target = players[0]
 
 func _physics_process(delta: float) -> void:
+	# Apply gravity
+	if not is_on_floor():
+		velocity.y -= ProjectSettings.get_setting("physics/3d/default_gravity") * delta
+
 	match state:
 		State.IDLE:
-			velocity = Vector3.ZERO
+			velocity.x = 0
+			velocity.z = 0
 		State.WANDER:
 			move_towards_point(wander_target, delta)
 		State.CHASE:
